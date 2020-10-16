@@ -28,37 +28,26 @@ namespace AOE\Crawler\Backend;
  *  This copyright notice MUST APPEAR in all copies of the script!
  ***************************************************************/
 
+use AOE\Crawler\Backend\RequestForm\RequestFormFactory;
 use AOE\Crawler\Configuration\ExtensionConfigurationProvider;
 use AOE\Crawler\Controller\CrawlerController;
 use AOE\Crawler\Converter\JsonCompatibilityConverter;
-use AOE\Crawler\Domain\Model\Reason;
-use AOE\Crawler\Domain\Repository\ProcessRepository;
 use AOE\Crawler\Domain\Repository\QueueRepository;
 use AOE\Crawler\Hooks\CrawlerHookInterface;
 use AOE\Crawler\Service\ProcessService;
-use AOE\Crawler\Utility\MessageUtility;
-use AOE\Crawler\Utility\PhpBinaryUtility;
-use AOE\Crawler\Utility\SignalSlotUtility;
 use AOE\Crawler\Value\CrawlAction;
-use AOE\Crawler\Value\ModuleMenu;
 use AOE\Crawler\Value\ModuleSettings;
 use Psr\Http\Message\UriInterface;
 use TYPO3\CMS\Backend\Routing\UriBuilder;
 use TYPO3\CMS\Backend\Template\ModuleTemplate;
-use TYPO3\CMS\Backend\Tree\View\PageTreeView;
 use TYPO3\CMS\Backend\Utility\BackendUtility;
-use TYPO3\CMS\Core\Compatibility\PublicMethodDeprecationTrait;
 use TYPO3\CMS\Core\Database\ConnectionPool;
 use TYPO3\CMS\Core\Database\Query\QueryBuilder;
 use TYPO3\CMS\Core\Http\Uri;
 use TYPO3\CMS\Core\Imaging\Icon;
 use TYPO3\CMS\Core\Imaging\IconFactory;
 use TYPO3\CMS\Core\Localization\LanguageService;
-use TYPO3\CMS\Core\Utility\CommandUtility;
-use TYPO3\CMS\Core\Utility\CsvUtility;
-use TYPO3\CMS\Core\Utility\DebugUtility;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
-use TYPO3\CMS\Core\Utility\MathUtility;
 use TYPO3\CMS\Extbase\Object\ObjectManager;
 use TYPO3\CMS\Fluid\View\StandaloneView;
 use TYPO3\CMS\Info\Controller\InfoModuleController;
@@ -266,7 +255,7 @@ class BackendModule
         }
         $this->view->assign('currentPageId', $this->id);
 
-        $selectedAction = (string) $this->pObj->MOD_SETTINGS['crawlaction'] ?? 'start';
+        $selectedAction = new CrawlAction($this->pObj->MOD_SETTINGS['crawlaction'] ?? 'start');
 
         // Type function menu:
         $actionDropdown = BackendUtility::getFuncMenu(
@@ -277,127 +266,12 @@ class BackendModule
         );
 
         $theOutput = '<h2>' . htmlspecialchars($this->getLanguageService()->getLL('title')) . '</h2>' . $actionDropdown;
-
-        // Branch based on type:
-        switch ($selectedAction) {
-            case 'log':
-                $quiPart = GeneralUtility::_GP('qid_details') ? '&qid_details=' . (int) GeneralUtility::_GP('qid_details') : '';
-                $setId = (int) GeneralUtility::_GP('setID');
-
-                // Additional menus for the log type:
-                $theOutput .= $this->getDepthDropDownHtml();
-                $theOutput .= $this->showLogAction($setId, $quiPart);
-                break;
-            case 'multiprocess':
-                $theOutput .= $this->processOverviewAction();
-                break;
-            case 'start':
-            default:
-                $theOutput .= $this->showCrawlerInformationAction();
-                break;
-        }
+        $theOutput .= $this->renderForm($selectedAction);
 
         return $theOutput;
     }
 
-    /*******************************
-     *
-     * Generate URLs for crawling:
-     *
-     ******************************/
 
-    /**
-     * Show a list of URLs to be crawled for each page
-     */
-    protected function showCrawlerInformationAction(): string
-    {
-        $this->view->setTemplate('ShowCrawlerInformation');
-        if (empty($this->id)) {
-            $this->isErrorDetected = true;
-            MessageUtility::addErrorMessage($this->getLanguageService()->sL('LLL:EXT:crawler/Resources/Private/Language/locallang.xlf:labels.noPageSelected'));
-        } else {
-            $crawlerParameter = GeneralUtility::_GP('_crawl');
-            $downloadParameter = GeneralUtility::_GP('_download');
-
-            $this->duplicateTrack = [];
-            $this->submitCrawlUrls = isset($crawlerParameter);
-            $this->downloadCrawlUrls = isset($downloadParameter);
-            $this->makeCrawlerProcessableChecks();
-
-            switch ((string) GeneralUtility::_GP('tstamp')) {
-                case 'midnight':
-                    $this->scheduledTime = mktime(0, 0, 0);
-                    break;
-                case '04:00':
-                    $this->scheduledTime = mktime(0, 0, 0) + 4 * 3600;
-                    break;
-                case 'now':
-                default:
-                    $this->scheduledTime = time();
-                    break;
-            }
-
-            $this->incomingConfigurationSelection = GeneralUtility::_GP('configurationSelection');
-            $this->incomingConfigurationSelection = is_array($this->incomingConfigurationSelection) ? $this->incomingConfigurationSelection : [];
-
-            $this->crawlerController = GeneralUtility::makeInstance(CrawlerController::class);
-            $this->crawlerController->setAccessMode('gui');
-            $this->crawlerController->setID = GeneralUtility::md5int(microtime());
-
-            $code = '';
-            $noConfigurationSelected = empty($this->incomingConfigurationSelection)
-                || (count($this->incomingConfigurationSelection) === 1 && empty($this->incomingConfigurationSelection[0]));
-            if ($noConfigurationSelected) {
-                MessageUtility::addWarningMessage($this->getLanguageService()->sL('LLL:EXT:crawler/Resources/Private/Language/locallang.xlf:labels.noConfigSelected'));
-            } else {
-                if ($this->submitCrawlUrls) {
-                    $reason = new Reason();
-                    $reason->setReason(Reason::REASON_GUI_SUBMIT);
-                    $reason->setDetailText('The user ' . $GLOBALS['BE_USER']->user['username'] . ' added pages to the crawler queue manually');
-
-                    $signalPayload = ['reason' => $reason];
-                    SignalSlotUtility::emitSignal(
-                        self::class,
-                        SignalSlotUtility::SIGNAL_INVOKE_QUEUE_CHANGE,
-                        $signalPayload
-                    );
-                }
-
-                $code = $this->crawlerController->getPageTreeAndUrls(
-                    $this->id,
-                    $this->pObj->MOD_SETTINGS['depth'],
-                    $this->scheduledTime,
-                    $this->reqMinute,
-                    $this->submitCrawlUrls,
-                    $this->downloadCrawlUrls,
-                    [], // Do not filter any processing instructions
-                    $this->incomingConfigurationSelection
-                );
-            }
-
-            $this->downloadUrls = $this->crawlerController->downloadUrls;
-            $this->duplicateTrack = $this->crawlerController->duplicateTrack;
-
-            $this->view->assign('noConfigurationSelected', $noConfigurationSelected);
-            $this->view->assign('submitCrawlUrls', $this->submitCrawlUrls);
-            $this->view->assign('amountOfUrls', count(array_keys($this->duplicateTrack)));
-            $this->view->assign('selectors', $this->generateConfigurationSelectors());
-            $this->view->assign('code', $code);
-            $this->view->assign('displayActions', 0);
-
-            // Download Urls to crawl:
-            if ($this->downloadCrawlUrls) {
-                // Creating output header:
-                header('Content-Type: application/octet-stream');
-                header('Content-Disposition: attachment; filename=CrawlerUrls.txt');
-
-                // Printing the content of the CSV lines:
-                echo implode(chr(13) . chr(10), $this->downloadUrls);
-                exit;
-            }
-        }
-        return $this->view->render();
-    }
 
     /**
      * Generates the configuration selectors for compiling URLs:
@@ -441,168 +315,6 @@ class BackendModule
         );
 
         return $selectors;
-    }
-
-    /*******************************
-     *
-     * Shows log of indexed URLs
-     *
-     ******************************/
-
-    /**
-     * @throws \TYPO3\CMS\Backend\Routing\Exception\RouteNotFoundException
-     */
-    protected function showLogAction(int $setId, string $quiPath): string
-    {
-        $this->view->setTemplate('ShowLog');
-        if (empty($this->id)) {
-            $this->isErrorDetected = true;
-            MessageUtility::addErrorMessage($this->getLanguageService()->sL('LLL:EXT:crawler/Resources/Private/Language/locallang.xlf:labels.noPageSelected'));
-        } else {
-            $this->crawlerController = GeneralUtility::makeInstance(CrawlerController::class);
-            $this->crawlerController->setAccessMode('gui');
-            $this->crawlerController->setID = GeneralUtility::md5int(microtime());
-
-            $csvExport = GeneralUtility::_POST('_csv');
-            $this->CSVExport = isset($csvExport);
-
-            // Read URL:
-            if (GeneralUtility::_GP('qid_read')) {
-                $this->crawlerController->readUrl((int) GeneralUtility::_GP('qid_read'), true);
-            }
-
-            // Look for set ID sent - if it is, we will display contents of that set:
-            $showSetId = (int) GeneralUtility::_GP('setID');
-
-            $queueId = GeneralUtility::_GP('qid_details');
-            $this->view->assign('queueId', $queueId);
-            $this->view->assign('setId', $showSetId);
-            // Show details:
-            if ($queueId) {
-                // Get entry record:
-                $q_entry = $this->queryBuilder
-                    ->from('tx_crawler_queue')
-                    ->select('*')
-                    ->where(
-                        $this->queryBuilder->expr()->eq('qid', $this->queryBuilder->createNamedParameter($queueId))
-                    )
-                    ->execute()
-                    ->fetch();
-
-                // Explode values
-                $q_entry['parameters'] = $this->jsonCompatibilityConverter->convert($q_entry['parameters']);
-                $q_entry['result_data'] = $this->jsonCompatibilityConverter->convert($q_entry['result_data']);
-                $resStatus = $this->getResStatus($q_entry['result_data']);
-                if (is_array($q_entry['result_data'])) {
-                    $q_entry['result_data']['content'] = $this->jsonCompatibilityConverter->convert($q_entry['result_data']['content']);
-                    if (! $this->pObj->MOD_SETTINGS['log_resultLog']) {
-                        unset($q_entry['result_data']['content']['log']);
-                    }
-                }
-
-                $this->view->assign('queueStatus', $resStatus);
-                $this->view->assign('queueDetails', DebugUtility::viewArray($q_entry));
-            } else {
-                // Show list
-                // Drawing tree:
-                $tree = GeneralUtility::makeInstance(PageTreeView::class);
-                $perms_clause = $GLOBALS['BE_USER']->getPagePermsClause(1);
-                $tree->init('AND ' . $perms_clause);
-
-                // Set root row:
-                $pageinfo = BackendUtility::readPageAccess(
-                    $this->id,
-                    $perms_clause
-                );
-                $HTML = $this->iconFactory->getIconForRecord('pages', $pageinfo, Icon::SIZE_SMALL)->render();
-                $tree->tree[] = [
-                    'row' => $pageinfo,
-                    'HTML' => $HTML,
-                ];
-
-                // Get branch beneath:
-                if ($this->pObj->MOD_SETTINGS['depth']) {
-                    $tree->getTree($this->id, $this->pObj->MOD_SETTINGS['depth']);
-                }
-
-                // If Flush button is pressed, flush tables instead of selecting entries:
-                if (GeneralUtility::_POST('_flush')) {
-                    $doFlush = true;
-                    $doFullFlush = false;
-                } elseif (GeneralUtility::_POST('_flush_all')) {
-                    $doFlush = true;
-                    $doFullFlush = true;
-                } else {
-                    $doFlush = false;
-                    $doFullFlush = false;
-                }
-                $itemsPerPage = (int) $this->pObj->MOD_SETTINGS['itemsPerPage'];
-                // Traverse page tree:
-                $code = '';
-                $count = 0;
-                foreach ($tree->tree as $data) {
-                    // Get result:
-                    $logEntriesOfPage = $this->crawlerController->getLogEntriesForPageId(
-                        (int) $data['row']['uid'],
-                        $this->pObj->MOD_SETTINGS['log_display'],
-                        $doFlush,
-                        $doFullFlush,
-                        $itemsPerPage
-                    );
-
-                    $code .= $this->drawLog_addRows(
-                        $logEntriesOfPage,
-                        $data['HTML'] . BackendUtility::getRecordTitle('pages', $data['row'], true)
-                    );
-                    if (++$count === 1000) {
-                        break;
-                    }
-                }
-                $this->view->assign('code', $code);
-            }
-
-            if ($this->CSVExport) {
-                $this->outputCsvFile();
-            }
-        }
-        $this->view->assign('showResultLog', (bool) $this->pObj->MOD_SETTINGS['log_resultLog']);
-        $this->view->assign('showFeVars', (bool) $this->pObj->MOD_SETTINGS['log_feVars']);
-        $this->view->assign('displayActions', 1);
-        $this->view->assign('displayLogFilterHtml', $this->getDisplayLogFilterHtml($setId));
-        $this->view->assign('itemPerPageHtml', $this->getItemsPerPageDropDownHtml());
-        $this->view->assign('showResultLogHtml', $this->getShowResultLogCheckBoxHtml($setId, $quiPath));
-        $this->view->assign('showFeVarsHtml', $this->getShowFeVarsCheckBoxHtml($setId, $quiPath));
-        return $this->view->render();
-    }
-
-    /**
-     * Outputs the CSV file and sets the correct headers
-     */
-    protected function outputCsvFile(): void
-    {
-        if (! count($this->CSVaccu)) {
-            MessageUtility::addWarningMessage($this->getLanguageService()->sL('LLL:EXT:crawler/Resources/Private/Language/locallang.xlf:message.canNotExportEmptyQueueToCsvText'));
-            return;
-        }
-        $csvLines = [];
-
-        // Field names:
-        reset($this->CSVaccu);
-        $fieldNames = array_keys(current($this->CSVaccu));
-        $csvLines[] = CsvUtility::csvValues($fieldNames);
-
-        // Data:
-        foreach ($this->CSVaccu as $row) {
-            $csvLines[] = CsvUtility::csvValues($row);
-        }
-
-        // Creating output header:
-        header('Content-Type: application/octet-stream');
-        header('Content-Disposition: attachment; filename=CrawlerLog.csv');
-
-        // Printing the content of the CSV lines:
-        echo implode(chr(13) . chr(10), $csvLines);
-        exit;
     }
 
     /**
@@ -769,70 +481,6 @@ class BackendModule
     }
 
     /**
-     * This method is used to show an overview about the active an the finished crawling processes
-     *
-     * @return string
-     */
-    protected function processOverviewAction()
-    {
-        $this->view->setTemplate('ProcessOverview');
-        $this->runRefreshHooks();
-        $this->makeCrawlerProcessableChecks();
-
-        try {
-            $this->handleProcessOverviewActions();
-        } catch (\Throwable $e) {
-            $this->isErrorDetected = true;
-            MessageUtility::addErrorMessage($e->getMessage());
-        }
-
-        $processRepository = GeneralUtility::makeInstance(ProcessRepository::class);
-        $queueRepository = GeneralUtility::makeInstance(QueueRepository::class);
-
-        $mode = $this->pObj->MOD_SETTINGS['processListMode'];
-        if ($mode === 'simple') {
-            $allProcesses = $processRepository->findAllActive();
-        } else {
-            $allProcesses = $processRepository->findAll();
-        }
-        $isCrawlerEnabled = ! $this->findCrawler()->getDisabled() && ! $this->isErrorDetected;
-        $currentActiveProcesses = $processRepository->findAllActive()->count();
-        $maxActiveProcesses = MathUtility::forceIntegerInRange($this->extensionSettings['processLimit'], 1, 99, 1);
-        $this->view->assignMultiple([
-            'pageId' => (int) $this->id,
-            'refreshLink' => $this->getRefreshLink(),
-            'addLink' => $this->getAddLink($currentActiveProcesses, $maxActiveProcesses, $isCrawlerEnabled),
-            'modeLink' => $this->getModeLink($mode),
-            'enableDisableToggle' => $this->getEnableDisableLink($isCrawlerEnabled),
-            'processCollection' => $allProcesses,
-            'cliPath' => $this->processManager->getCrawlerCliPath(),
-            'isCrawlerEnabled' => $isCrawlerEnabled,
-            'totalUnprocessedItemCount' => $queueRepository->countAllPendingItems(),
-            'assignedUnprocessedItemCount' => $queueRepository->countAllAssignedPendingItems(),
-            'activeProcessCount' => $currentActiveProcesses,
-            'maxActiveProcessCount' => $maxActiveProcesses,
-            'mode' => $mode,
-            'displayActions' => 0,
-        ]);
-
-        return $this->view->render();
-    }
-
-    /**
-     * Returns a tag for the refresh icon
-     *
-     * @throws \TYPO3\CMS\Backend\Routing\Exception\RouteNotFoundException
-     */
-    protected function getRefreshLink(): string
-    {
-        return $this->getLinkButton(
-            'actions-refresh',
-            $this->getLanguageService()->sL('LLL:EXT:crawler/Resources/Private/Language/locallang.xlf:labels.refresh'),
-            $this->getInfoModuleUrl(['SET[\'crawleraction\']' => 'crawleraction', 'id' => $this->id])
-        );
-    }
-
-    /**
      * Returns a link for the panel to enable or disable the crawler
      *
      * @throws \TYPO3\CMS\Backend\Routing\Exception\RouteNotFoundException
@@ -872,85 +520,6 @@ class BackendModule
             );
         }
         return '';
-    }
-
-    /**
-     * @throws \TYPO3\CMS\Backend\Routing\Exception\RouteNotFoundException
-     */
-    protected function getAddLink(int $currentActiveProcesses, int $maxActiveProcesses, bool $isCrawlerEnabled): string
-    {
-        if (! $isCrawlerEnabled) {
-            return '';
-        }
-        if ($currentActiveProcesses >= $maxActiveProcesses) {
-            return '';
-        }
-
-        return $this->getLinkButton(
-            'actions-add',
-            $this->getLanguageService()->sL('LLL:EXT:crawler/Resources/Private/Language/locallang.xlf:labels.process.add'),
-            $this->getInfoModuleUrl(['action' => 'addProcess'])
-        );
-    }
-
-    /**
-     * Verify that the crawler is executable.
-     */
-    protected function makeCrawlerProcessableChecks(): void
-    {
-        if (! $this->isPhpForkAvailable()) {
-            $this->isErrorDetected = true;
-            MessageUtility::addErrorMessage($this->getLanguageService()->sL('LLL:EXT:crawler/Resources/Private/Language/locallang.xlf:message.noPhpForkAvailable'));
-        }
-
-        $exitCode = 0;
-        $out = [];
-        CommandUtility::exec(
-            PhpBinaryUtility::getPhpBinary() . ' -v',
-            $out,
-            $exitCode
-        );
-        if ($exitCode > 0) {
-            $this->isErrorDetected = true;
-            MessageUtility::addErrorMessage(sprintf($this->getLanguageService()->sL('LLL:EXT:crawler/Resources/Private/Language/locallang.xlf:message.phpBinaryNotFound'), htmlspecialchars($this->extensionSettings['phpPath'])));
-        }
-    }
-
-    /**
-     * Indicate that the required PHP method "popen" is
-     * available in the system.
-     */
-    protected function isPhpForkAvailable(): bool
-    {
-        return function_exists('popen');
-    }
-
-    /**
-     * Method to handle incomming actions of the process overview
-     *
-     * @throws ProcessException
-     */
-    protected function handleProcessOverviewActions(): void
-    {
-        $crawler = $this->findCrawler();
-
-        switch (GeneralUtility::_GP('action')) {
-            case 'stopCrawling':
-                //set the cli status to disable (all processes will be terminated)
-                $crawler->setDisabled(true);
-                break;
-            case 'addProcess':
-                if ($this->processManager->startProcess() === false) {
-                    throw new ProcessException($this->getLanguageService()->sL('LLL:EXT:crawler/Resources/Private/Language/locallang.xlf:labels.newprocesserror'));
-                }
-                MessageUtility::addNoticeMessage($this->getLanguageService()->sL('LLL:EXT:crawler/Resources/Private/Language/locallang.xlf:labels.newprocess'));
-                break;
-            case 'resumeCrawling':
-            default:
-                //set the cli status to end (all processes will be terminated)
-                $crawler->setDisabled(false);
-                break;
-        }
     }
 
     /**
@@ -1056,58 +625,13 @@ class BackendModule
         return $uriBuilder->buildUriFromRoute('web_info', $uriParameters);
     }
 
-    private function getDepthDropDownHtml(): string
+    private function renderForm(CrawlAction $selectedAction): string
     {
-        return BackendUtility::getFuncMenu(
+        $requestForm = RequestFormFactory::create($selectedAction, $this->view);
+        return $requestForm->render(
             $this->id,
-            'SET[depth]',
             $this->pObj->MOD_SETTINGS['depth'],
             $this->pObj->MOD_MENU['depth']
         );
-    }
-
-    private function getDisplayLogFilterHtml(int $setId): string
-    {
-        return $this->getLanguageService()->sL('LLL:EXT:crawler/Resources/Private/Language/locallang.xlf:labels.display') . ': ' . BackendUtility::getFuncMenu(
-                $this->id,
-                'SET[log_display]',
-                $this->pObj->MOD_SETTINGS['log_display'],
-                $this->pObj->MOD_MENU['log_display'],
-                'index.php',
-                '&setID=' . $setId
-            );
-    }
-
-    private function getShowResultLogCheckBoxHtml(int $setId, string $quiPart): string
-    {
-        return BackendUtility::getFuncCheck(
-                $this->id,
-                'SET[log_resultLog]',
-                $this->pObj->MOD_SETTINGS['log_resultLog'],
-                'index.php',
-                '&setID=' . $setId . $quiPart
-            ) . '&nbsp;' . $this->getLanguageService()->sL('LLL:EXT:crawler/Resources/Private/Language/locallang.xlf:labels.showresultlog');
-    }
-
-    private function getShowFeVarsCheckBoxHtml(int $setId, string $quiPart): string
-    {
-        return BackendUtility::getFuncCheck(
-                $this->id,
-                'SET[log_feVars]',
-                $this->pObj->MOD_SETTINGS['log_feVars'],
-                'index.php',
-                '&setID=' . $setId . $quiPart
-            ) . '&nbsp;' . $this->getLanguageService()->sL('LLL:EXT:crawler/Resources/Private/Language/locallang.xlf:labels.showfevars');
-    }
-
-    private function getItemsPerPageDropDownHtml(): string
-    {
-        return $this->getLanguageService()->sL('LLL:EXT:crawler/Resources/Private/Language/locallang.xlf:labels.itemsPerPage') . ': ' .
-            BackendUtility::getFuncMenu(
-                $this->id,
-                'SET[itemsPerPage]',
-                $this->pObj->MOD_SETTINGS['itemsPerPage'],
-                $this->pObj->MOD_MENU['itemsPerPage']
-            );
     }
 }
