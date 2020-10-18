@@ -317,8 +317,6 @@ class BackendModule
         return $selectors;
     }
 
-
-
     /**
      * Find Fe vars
      */
@@ -330,10 +328,6 @@ class BackendModule
         $requestResult = $this->jsonCompatibilityConverter->convert($resultData['content']);
         return $requestResult['vars'] ?? [];
     }
-
-
-
-
 
     /**
      * Returns a link for the panel to enable or disable the crawler
