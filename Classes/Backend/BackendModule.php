@@ -378,20 +378,7 @@ class BackendModule
         return '<select class="form-control" name="' . htmlspecialchars($name . ($multiple ? '[]' : '')) . '"' . ($multiple ? ' multiple' : '') . '>' . implode('', $options) . '</select>';
     }
 
-    /**
-     * Activate hooks
-     */
-    protected function runRefreshHooks(): void
-    {
-        $crawlerLib = GeneralUtility::makeInstance(CrawlerController::class);
-        foreach ($GLOBALS['TYPO3_CONF_VARS']['EXTCONF']['crawler']['refresh_hooks'] ?? [] as $objRef) {
-            /** @var CrawlerHookInterface $hookObj */
-            $hookObj = GeneralUtility::makeInstance($objRef);
-            if (is_object($hookObj)) {
-                $hookObj->crawler_init($crawlerLib);
-            }
-        }
-    }
+
 
     protected function initializeView(): void
     {
@@ -429,9 +416,7 @@ class BackendModule
     protected function getInfoModuleUrl(array $uriParameters = []): Uri
     {
         if (GeneralUtility::_GP('id')) {
-            $uriParameters = array_merge($uriParameters, [
-                'id' => GeneralUtility::_GP('id'),
-            ]);
+            $uriParameters['id'] = GeneralUtility::_GP('id');
         }
         /** @var UriBuilder $uriBuilder */
         $uriBuilder = GeneralUtility::makeInstance(UriBuilder::class);
