@@ -1,5 +1,10 @@
 # Changelog TYPO3 Crawler
 
+## Crawler 9.1.2-dev
+
+### Fixed
+* Makes sure the QueueRepository is always set when needed in Domain/Model/Process
+
 ## Crawler 9.1.1
 Crawler 9.1.1 was released on October 17th, 2020
 
